@@ -125,12 +125,12 @@ def create_circular_detector(r, Ks, plane_size):
     return out
 
 def draw_circular_detector(img, r, Ks):
-    color = img.max()//2
+    color = img.max()/10 * 0.9
     num_detectors = Ks.shape[1]
     for i in range(num_detectors):
         x = Ks[1,i]
         y = Ks[0,i]
-        img = cv2.circle(img, (int(x), int(y)), int(r), color, 3)
+        img = cv2.circle(img, (int(x), int(y)), int(r), color * (i + 1), 3)
     return img
 
 def save_image(img, path, title, colorbar):

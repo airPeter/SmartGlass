@@ -163,7 +163,7 @@ class Coherent:
                     I_img = np.squeeze(I_img[0])
                     I_img = self.detector.draw(I_img, self.step_size)
                     writer.add_figure('I_img',
-                                    get_img(I_img),
+                                    get_img(I_img, ''),
                                     global_step= global_step)  
                     phase = self.model.optical.phase.detach().cpu().numpy()
                     phase = np.squeeze(phase)
