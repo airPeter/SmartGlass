@@ -45,7 +45,7 @@ class CirleDetector:
     def draw(self, img, step_size):
         r = toint(self.radius/step_size)
         Ks = toint(self.coos/step_size)
-        draw_circular_detector(img, r, Ks)
+        return draw_circular_detector(img, r, Ks)
         
 class Coherent:
     def __init__(self, wavelength, num_layers, size, res, prop_dis, object, detector, substrate = None, aperture = False) -> None:
