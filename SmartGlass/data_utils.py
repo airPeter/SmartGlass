@@ -5,7 +5,22 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix
 import seaborn as sns
 import pandas as pd
-
+from torch.utils.data import Dataset
+class SimpleDataset(Dataset):
+    def __init__(self,X, Y, transform = None):
+        self.X = X 
+        self.Y = Y
+        self.transform = transform
+        
+    def __getitem__(self,index): 
+        sample = {'X':self.X[index], 'Y': self.Y[index]}
+        if self.transform:
+            sample = self.transform(sample)
+        return sample
+    
+    def __len__(self):
+        return self.X.shape[0]
+    
 def normal(x, y, ux, uy, sigma):
     output = np.exp(-((x-ux)**2 + (y - uy)**2)/(2*sigma**2))
     return output
@@ -32,26 +47,21 @@ def map_label(labels, subset, label_map1):
     return out_label, out_group
     
 def input_label_process(x,y,plane_size, object_size, font, random_shift, background):
-    if len(x.shape) == 2:
-        x = x.reshape(1, x.shape[0], x.shape[1])
-    output_x = np.zeros((x.shape[0],1, plane_size,plane_size))     
-    for i in range(x.shape[0]):
-        img_resized = cv2.resize(x[i],(object_size, object_size))
-        img_blured = cv2.cv2.GaussianBlur(img_resized,(font,font),0)
-        img_blured[img_blured > 0.1] = 1
-        img_blured[img_blured <= 0.1] = 0
-        if background:
-            img_blured = img_blured * random_intensity_bias(object_size)
-        shift_x = (plane_size - object_size)//2
-        if random_shift:
-            shift = np.random.randint(-shift_x//2, shift_x//2, (2,)) + shift_x
-        else:
-            shift = np.array([shift_x, shift_x], dtype = int)
-        
-        output_tmp = np.zeros((plane_size, plane_size))
-        output_tmp[shift[0]: shift[0] + object_size, shift[1]: shift[1] + object_size] = img_blured
-        output_x[i] = np.reshape(output_tmp, (1, plane_size, plane_size))
     
+    img_resized = cv2.resize(x,(object_size, object_size))
+    img_blured = cv2.cv2.GaussianBlur(img_resized,(font,font),0)
+    img_blured[img_blured > 0.1] = 1
+    img_blured[img_blured <= 0.1] = 0
+    if background:
+        img_blured = img_blured * random_intensity_bias(object_size)
+    shift_x = (plane_size - object_size)//2
+    if random_shift:
+        shift = np.random.randint(-shift_x//2, shift_x//2, (2,)) + shift_x
+    else:
+        shift = np.array([shift_x, shift_x], dtype = int)
+    output_tmp = np.zeros((plane_size, plane_size))
+    output_tmp[shift[0]: shift[0] + object_size, shift[1]: shift[1] + object_size] = img_blured
+    output_x = np.reshape(output_tmp, (1, plane_size, plane_size))
     return output_x, y
 
 def data_generator(batch_size, data, data_label, group, shuffle):
@@ -114,13 +124,12 @@ def create_circular_detector(r, Ks, plane_size):
         out[0,i] = cv2.circle(out[0,i], (int(x), int(y)), int(r), 1, -1)
     return out
 
-def draw_circular_detector(img, R, r, K, plane_size):
-    C = plane_size//2
+def draw_circular_detector(img, r, Ks):
     color = img.max()//2
-    for i in range(K):
-        theta = i * 2 * np.pi / K
-        x = C + R * np.cos(theta)
-        y = C + R * np.sin(theta)
+    num_detectors = Ks.shape[1]
+    for i in range(num_detectors):
+        x = Ks[1,i]
+        y = Ks[0,i]
         img = cv2.circle(img, (int(x), int(y)), int(r), color, 3)
     return img
 

@@ -7,8 +7,12 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from .Coherent_model import optical_model
-from .data_utils import create_circular_detector, input_label_process
+from .data_utils import create_circular_detector, input_label_process, draw_circular_detector, SimpleDataset
 from .optical_utils import propagator, init_aperture
+import os
+from torch.utils.tensorboard import SummaryWriter
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 def toint(x):
     if type(x) == np.ndarray:
@@ -38,6 +42,10 @@ class CirleDetector:
         r = toint(self.radius/step_size)
         Ks = toint(self.coos/step_size)
         return create_circular_detector(r, Ks, plane_size)
+    def draw(self, img, step_size):
+        r = toint(self.radius/step_size)
+        Ks = toint(self.coos/step_size)
+        draw_circular_detector(img, r, Ks)
         
 class Coherent:
     def __init__(self, wavelength, num_layers, size, res, prop_dis, object, detector, substrate = None, aperture = False) -> None:
@@ -107,6 +115,100 @@ class Coherent:
             signal, logit = self.model(data_input, noise = None)
         signal = signal.cpu().numpy()
         return signal
-    #def optimze_optics(self, lr, beta, batch_size, epoches, test_freq):
-    
-        
+    def optimze_optics(self, lr, beta, batch_size, epoches, test_freq, notes, mu_white_noise, data_path):
+        out_path = 'output_coherent/'
+        if not os.path.exists(out_path):
+            os.mkdir(out_path)
+        out_path = out_path + notes + '/'
+        writer = SummaryWriter(out_path + 'summary1')
+        x_train = np.load(data_path+'x_train_f.npy')
+        y_train = np.load(data_path+'y_train_f.npy')    
+        def trans2obj(sample):
+            sample['X'] = self.gen_obj(sample['X'])
+            return sample
+        dataset_train = SimpleDataset(x_train, y_train, trans2obj)
+        dataloader_train = DataLoader(dataset_train,
+                                shuffle=True,
+                                batch_size= batch_size)
+        print(f"Number of batches per epoch: {len(dataloader_train)}.")
+        loss = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(self.model.parameters(), lr=lr)
+        prop_noise_dist = torch.distributions.normal.Normal(0, 0.03)
+        white_noise_dist = torch.distributions.normal.Normal(mu_white_noise, 0.6 * mu_white_noise)
+        for epoch in tqdm(range(epoches)):
+            for step, sample in enumerate(tqdm(dataloader_train)):
+                X, Y = sample['X'], sample['Y']
+                X_input, Y_input = torch.as_tensor(X).to(self.device, dtype = self.dtype), torch.as_tensor(Y).to(self.device)
+                prop_noise = prop_noise_dist.sample(torch.Size([1, self.plane_size, self.plane_size])).to(self.device, dtype = torch.double)
+                white_noise = white_noise_dist.sample(torch.Size([1, self.plane_size, self.plane_size])).to(self.device, dtype = torch.double)
+                noise = (prop_noise, white_noise)
+                signal, logit = self.model(X_input, noise)
+                # Calculate loss 
+                err1 = loss(logit, Y_input)
+                err2 = - beta * logit.sum()
+                err = err1 + err2
+                # Calculate gradients in backward pass
+                optimizer.zero_grad()
+                err.backward()
+                optimizer.step()
+                global_step = epoch * len(dataloader_train) + step
+                
+                if (global_step + 1)% test_freq == 0:
+                    self.test(batch_size, data_path)
+                    obj_img = np.squeeze(X[0])
+                    writer.add_figure('obj',
+                                    get_img(obj_img, str(Y[0].item())),
+                                    global_step= global_step)
+                    I_img = signal.detach().cpu().numpy()[0]
+                    I_img = np.squeeze(I_img[0])
+                    I_img = self.detector.draw(I_img, self.step_size)
+                    writer.add_figure('I_img',
+                                    get_img(I_img),
+                                    global_step= global_step)  
+                    phase = self.model.optical.phase.detach().cpu().numpy()
+                    phase = np.squeeze(phase)
+                    writer.add_figure('phase',
+                                    get_img(phase),
+                                    global_step= global_step) 
+                
+                log_freq = int((len(dataloader_train))/10)
+                if (global_step + 1)% log_freq == 0:
+                    writer.add_scalar('crossentropy loss',
+                        scalar_value = err1.item(), global_step = global_step)
+                    writer.add_scalar('logit sum loss',
+                        scalar_value = err2.item(), global_step = global_step)
+        np.savetxt(out_path + "phase.csv", phase, delimiter= ',')    
+
+    def test(self, batch_size, data_path):
+        self.model.eval()
+        Y_pred = []
+        Y_label = []
+        x_test = np.load(data_path+'x_test_f.npy')
+        y_test = np.load(data_path+'y_test_f.npy')    
+        def trans2obj(sample):
+            sample['X'] = self.gen_obj(sample['X'])
+            return sample
+        dataset_test = SimpleDataset(x_test, y_test, trans2obj)
+        dataloader_test = DataLoader(dataset_test,
+                                shuffle=True,
+                                batch_size= batch_size)
+        with torch.no_grad():
+            for sample in dataloader_test:
+                    X, Y = sample['X'], sample['Y']
+                    Y_label += Y.tolist()
+                    X_input, Y_input = torch.as_tensor(X).to(self.device, dtype = self.dtype), torch.as_tensor(Y).to(self.device)
+                    _, logit = self.model(X_input, None)
+                    pred = np.argmax(logit.cpu().numpy(), axis = -1)
+                    Y_pred = Y_pred + pred.tolist()
+        right_num = np.equal(Y_label, Y_pred).sum()
+        test_acc = right_num/len(Y_label)
+        print(f"Test accuracy: {test_acc * 100:.2f}%.")
+        return None
+
+def get_img(img, title = None):
+    fig = plt.figure()
+    plt.imshow(img)
+    plt.colorbar()
+    if not (title is None):
+        plt.title(title)
+    return fig
