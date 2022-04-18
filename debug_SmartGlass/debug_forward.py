@@ -7,17 +7,16 @@ import matplotlib.pyplot as plt
 import torchvision
 
 obj = SG.MNISTObj(font = 9, size = 40)
-K = 10
+num_classes = 10
 C = 25
 R = 15
 coos = []
-for i in range(K):
-    theta = i * 2 * np.pi / K
+for i in range(num_classes):
+    theta = i * 2 * np.pi / num_classes
     x = C + R * np.cos(theta)
     y = C + R * np.sin(theta)
-    coos.append((y, x))
+    coos.append([y, x])
 coos = np.array(coos)
-coos = coos.T
 detector = SG.CirleDetector(radius= 5, coos = coos)
 sim = SG.Coherent(
     wavelength = 1,
@@ -26,10 +25,10 @@ sim = SG.Coherent(
     res = 2,
     prop_dis = 100,
     object = obj,
-    detector = detector
+    num_classes= num_classes,
 )
 init_phase = SG.lens_profile(sim.plane_size, sim.step_size, sim.prop_dis/2, sim.wavelength)
-sim.init_model('cuda', init_phase)
+sim.init_model('cuda', init_phase, detector)
 
 mnist = torchvision.datasets.MNIST('dataset/', train= False, download = True)
 x, y = mnist[0]

@@ -30,7 +30,7 @@ class optical_layer(torch.nn.Module):
         '''
         super(optical_layer, self).__init__()
         self.plane_size = plane_size
-        self.phase = torch.nn.Parameter(torch.empty((1, 1, plane_size, plane_size), dtype = torch.double))
+        self.phase = torch.nn.Parameter(torch.empty((1, 1, plane_size, plane_size)))
 
     def forward(self, signal):
         '''
@@ -48,7 +48,7 @@ class optical_layer(torch.nn.Module):
         torch.nn.init.constant_(self.phase, val = 0)
 
 class optical_model(torch.nn.Module):
-    def __init__(self, num_layers, plane_size, f_kernel, f_kernel_sub, aperture, circular_mask):
+    def __init__(self, num_layers, plane_size, f_kernel, f_kernel_sub, aperture, num_classes):
         '''
         args:
             f_kernel: tensor, np.fft.fft2(np.fft.ifftshift(prop)), prop is the propagator generated from Raleigh Sommerfield equation
@@ -61,7 +61,7 @@ class optical_model(torch.nn.Module):
         self.register_buffer('fk_const', f_kernel)
         self.register_buffer('fk_sub_const', f_kernel_sub)
         self.register_buffer('aperture_const', aperture)
-        self.register_buffer('mask_const', circular_mask)
+        self.mask_const = torch.nn.Parameter(torch.empty((1, num_classes, plane_size, plane_size))).requires_grad_(requires_grad=False)
 
     def forward(self, signal, noise):
         

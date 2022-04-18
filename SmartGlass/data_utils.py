@@ -116,20 +116,20 @@ def plt_detector(ax):
     return    
 
 def create_circular_detector(r, Ks, plane_size):
-    num_detectors = Ks.shape[1]
+    num_detectors = len(Ks)
     out = np.zeros((1, num_detectors, plane_size, plane_size))
     for i in range(num_detectors):
-        x = Ks[1,i]
-        y = Ks[0,i]
+        x = Ks[i,1]
+        y = Ks[i,0]
         out[0,i] = cv2.circle(out[0,i], (int(x), int(y)), int(r), 1, -1)
     return out
 
 def draw_circular_detector(img, r, Ks):
     color = img.max()/10 * 0.9
-    num_detectors = Ks.shape[1]
+    num_detectors = len(Ks)
     for i in range(num_detectors):
-        x = Ks[1,i]
-        y = Ks[0,i]
+        x = Ks[i,1]
+        y = Ks[i,0]
         img = cv2.circle(img, (int(x), int(y)), int(r), color * (i + 1), 3)
     return img
 

@@ -1,4 +1,6 @@
 import sys
+
+from soupsieve import select
 module_path = 'C:/Users/94735/OneDrive - UW-Madison/My Projects/Navy_STTR/'
 sys.path.insert(1, module_path)
 import SmartGlass as SG
@@ -28,15 +30,12 @@ sim = SG.Coherent(
     num_classes= num_classes,
 )
 #init_phase = SG.lens_profile(sim.plane_size, sim.step_size, sim.prop_dis/2, sim.wavelength)
-sim.init_model('cuda', init_phase = None, init_detector = detector)
-sim.optimze_optics(
-    lr = 0.001, 
-    beta = 0.001,
-    batch_size = 32,
-    epoches = 1,
-    test_freq = 500,
-    notes = 'April14_debug',
-    mu_white_noise= 10, # >0
-    data_path = 'dataset/MNIST/')
-
+phase = np.genfromtxt("output_coherent/April14_size100/phase.csv", delimiter = ',')
+sim.init_model('cuda', init_phase = phase, init_detector = detector)
+batch_size = 64
+data_path = 'dataset/MNIST/'
+test_samples = 10000
+select_idx = np.random.choice(np.arange(test_samples), size = (500,))
+opt_res = sim.optimze_detector(batch_size, data_path, select_idx, n_iter = 100)
+print(opt_res.best_para)
 

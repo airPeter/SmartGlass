@@ -1,8 +1,10 @@
 '''
     unit [um].
 '''
+from cv2 import phase
 import matplotlib.pyplot as plt
 import numpy as np
+from sklearn.metrics import SCORERS
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -34,7 +36,7 @@ class CirleDetector:
     def __init__(self, radius, coos) -> None:
         '''
         input:
-            coos: a numpy array with shape (2, num_detectors) store the coordinates for each cirular detector.
+            coos: a numpy array with shape (num_detectors, 2) store the coordinates for each cirular detector.
         '''
         self.radius = radius
         self.coos = coos
@@ -46,9 +48,22 @@ class CirleDetector:
         r = toint(self.radius/step_size)
         Ks = toint(self.coos/step_size)
         return draw_circular_detector(img, r, Ks)
-        
+    def invalid(self,):
+        '''
+            check whether there's overlap between detectors.
+        '''
+        def overlap(ps, r):
+            if len(ps) == 1:
+                return False
+            else:
+                for i in range(1, len(ps)):
+                    dis = np.sqrt(((ps[i] - ps[0])**2).sum())
+                    if dis < r:
+                        return True
+                return overlap(ps[1:], r)
+        return overlap(self.coos, self.radius)
 class Coherent:
-    def __init__(self, wavelength, num_layers, size, res, prop_dis, object, detector, substrate = None, aperture = False) -> None:
+    def __init__(self, wavelength, num_layers, size, res, prop_dis, object, num_classes, substrate = None, aperture = False) -> None:
         self.wavelength = wavelength
         self.num_layers = num_layers
         if num_layers > 1:
@@ -59,18 +74,19 @@ class Coherent:
         self.plane_size = toint(self.size/self.step_size)
         self.prop_dis = prop_dis
         self.object = object
-        self.detector = detector
+        self.num_class = num_classes
+        self.detector = None
         self.substrate = substrate
         self.aperture = aperture
         self.model = None
         self.dtype = torch.float32
         self.cdtype = torch.complex64
         self.device = None
+        self.out_path = None
         
-    def init_model(self, device, init_phase):
+    def init_model(self, device, init_phase = None, init_detector = None):
+        self.detector = init_detector
         self.device = device
-        circular_mask = self.detector.create(self.plane_size, self.step_size)
-        circular_mask = torch.tensor(circular_mask, device = 'cpu', dtype=self.dtype, requires_grad = False)
         prop = propagator(self.plane_size, self.step_size, self.prop_dis, self.wavelength)
         f_kernel = np.fft.fft2(np.fft.ifftshift(prop))
         f_kernel = torch.tensor(f_kernel, device='cpu', dtype=self.cdtype, requires_grad = False)
@@ -83,23 +99,34 @@ class Coherent:
         if self.aperture:
             aperture = init_aperture(self.plane_size)
             aperture = torch.tensor(aperture, device='cpu',dtype=self.dtype, requires_grad = False)
-        self.model = optical_model(self.num_layers, self.plane_size, f_kernel, f_kernel_sub, aperture, circular_mask)
-        self.init_paras(init_phase)
+        self.model = optical_model(self.num_layers, self.plane_size, f_kernel, f_kernel_sub, aperture, self.num_class)
+        self.init_paras(init_phase, init_detector)
         self.model.to(device)
+    
+    def assign_detector(self, detector):
+        circular_mask = detector.create(self.plane_size, self.step_size)
+        circular_mask = torch.tensor(circular_mask, dtype=self.dtype, requires_grad = False)
+        state_dict = self.model.state_dict()
+        state_dict['mask_const'] = circular_mask
+        self.model.load_state_dict(state_dict)
+        print("detector assigned.")
         
-    def init_paras(self, init_phase = None):
+    def init_paras(self, init_phase, init_detector):
         self.model.reset()
         if init_phase is None:
             print('initialized by default phase paras.')
-            return None
         else:
-            init_phase = torch.tensor(init_phase, dtype = torch.float)
-            state_dict = self.model.state_dict()
-            state_dict['optical.phase'] = init_phase
-            self.model.load_state_dict(state_dict)
-            print('initialized by loaded init_phase.')
-            return None 
-        
+            self.assign_phase(init_phase)
+        self.assign_detector(init_detector)
+            
+    def assign_phase(self, init_phase):
+        init_phase = np.reshape(init_phase, (1, 1, self.plane_size, self.plane_size))
+        init_phase = torch.tensor(init_phase, dtype = self.dtype)
+        state_dict = self.model.state_dict()
+        state_dict['optical.phase'] = init_phase
+        self.model.load_state_dict(state_dict)
+        print("phase assigned.")
+        return None
     def gen_obj(self, img, random_shift = False, background = False):
         '''
             process a img into a model input.
@@ -115,11 +142,71 @@ class Coherent:
             signal, logit = self.model(data_input, noise = None)
         signal = signal.cpu().numpy()
         return signal
+    
+    def optimze_detector(self, batch_size, data_path, select_idx, subspace_size = 10, n_iter = 20):
+        from gradient_free_optimizers import HillClimbingOptimizer
+        radius = self.detector.radius
+        init_coos = self.detector.coos
+        def dict2arr(paras):
+            coos = []
+            for key in paras.keys():
+                coos.append(paras[key])
+            coos = np.array(coos)
+            coos = coos.reshape(-1, 2)
+            return coos
+        def arr2dict(coos):
+            #coos shape: [number of detectors, 2]
+            paras = {}
+            for i in range(len(coos)):
+                paras['y' + str(i)] = coos[i, 0]
+                paras['x' + str(i)] = coos[i, 1]
+            return paras
+        def fit2space(sub_space, init_paras):
+            shape = init_paras.shape
+            init_paras = init_paras.reshape(-1,)
+            for i in range(len(init_paras)):
+                pi = init_paras[i]
+                idx = np.argmin(np.abs(pi - sub_space))
+                init_paras[i] = sub_space[idx]
+            init_paras = init_paras.reshape(shape)
+            return init_paras
+        def obj_function(paras):
+            '''
+            paras is a dict that store the position of each detector.
+            '''
+            coos = dict2arr(paras)
+            tmp_detector = CirleDetector(radius, coos)
+            if tmp_detector.invalid():
+                return 0
+            self.assign_detector(tmp_detector)
+            score = self.test(batch_size, data_path, select_idx)
+            return score 
+        domain_min = 2 * radius
+        domain_max = self.size - domain_min
+        sub_space = np.round(np.linspace(domain_min, domain_max, subspace_size))
+        print("sub space:")
+        print(sub_space)
+        search_space = {}
+        for i in range(len(init_coos)):
+                search_space['y' + str(i)] = sub_space.copy()
+                search_space['x' + str(i)] = sub_space.copy()
+        
+        init_paras = fit2space(sub_space, init_coos)
+        init_paras = arr2dict(init_paras)
+        print("init paras:")
+        print(init_paras)
+        initialize={"warm_start": [arr2dict(init_coos)]}
+        opt = HillClimbingOptimizer(search_space, initialize)
+        opt.search(obj_function, n_iter=n_iter)
+        print(f"best acc: {opt.best_score}")
+        print("If you want to continue to train the phase, remember to assign detector by the best paras.")
+        return opt
+    
     def optimze_optics(self, lr, beta, batch_size, epoches, test_freq, notes, mu_white_noise, data_path):
         out_path = 'output_coherent/'
         if not os.path.exists(out_path):
             os.mkdir(out_path)
-        out_path = out_path + notes + '/'
+        self.out_path = out_path = out_path + notes + '/'
         writer = SummaryWriter(out_path + 'summary1')
         x_train = np.load(data_path+'x_train_f.npy')
         y_train = np.load(data_path+'y_train_f.npy')    
@@ -136,7 +223,7 @@ class Coherent:
         prop_noise_dist = torch.distributions.normal.Normal(0, 0.03)
         white_noise_dist = torch.distributions.normal.Normal(mu_white_noise, 0.6 * mu_white_noise)
         for epoch in tqdm(range(epoches)):
-            for step, sample in enumerate(tqdm(dataloader_train)):
+            for step, sample in enumerate(tqdm(dataloader_train, leave=False)):
                 X, Y = sample['X'], sample['Y']
                 X_input, Y_input = torch.as_tensor(X).to(self.device, dtype = self.dtype), torch.as_tensor(Y).to(self.device)
                 prop_noise = prop_noise_dist.sample(torch.Size([1, self.plane_size, self.plane_size])).to(self.device, dtype = torch.double)
@@ -179,12 +266,16 @@ class Coherent:
                         scalar_value = err2.item(), global_step = global_step)
         np.savetxt(out_path + "phase.csv", phase, delimiter= ',')    
 
-    def test(self, batch_size, data_path):
+    def test(self, batch_size, data_path, select_idx = None):
         self.model.eval()
         Y_pred = []
         Y_label = []
         x_test = np.load(data_path+'x_test_f.npy')
-        y_test = np.load(data_path+'y_test_f.npy')    
+        y_test = np.load(data_path+'y_test_f.npy')   
+        if not (select_idx is None):
+            x_test = np.take(x_test, select_idx, axis = 0)
+            y_test = np.take(y_test, select_idx, axis = 0)
+         
         def trans2obj(sample):
             sample['X'] = self.gen_obj(sample['X'])
             return sample
@@ -203,7 +294,7 @@ class Coherent:
         right_num = np.equal(Y_label, Y_pred).sum()
         test_acc = right_num/len(Y_label)
         print(f"Test accuracy: {test_acc * 100:.2f}%.")
-        return None
+        return test_acc
 
 def get_img(img, title = None):
     fig = plt.figure()
