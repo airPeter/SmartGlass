@@ -36,6 +36,14 @@ batch_size = 64
 data_path = 'dataset/MNIST/'
 test_samples = 10000
 select_idx = np.random.choice(np.arange(test_samples), size = (500,))
+# sim.optimze_optics(
+#     lr = 0.001, 
+#     beta = 0.001,
+#     batch_size = batch_size,
+#     epoches = 2,
+#     test_freq = 500,
+#     notes = 'April18_size100',
+#     mu_white_noise= 10, # >0
+#     data_path = data_path)
 opt_res = sim.optimze_detector(batch_size, data_path, select_idx, n_iter = 100)
-print(opt_res.best_para)
 

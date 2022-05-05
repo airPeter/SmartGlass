@@ -29,14 +29,16 @@ sim = SG.Coherent(
 )
 #init_phase = SG.lens_profile(sim.plane_size, sim.step_size, sim.prop_dis/2, sim.wavelength)
 sim.init_model('cuda', init_phase = None, init_detector = detector)
+batch_size = 64
+data_path = 'dataset/MNIST/'
 sim.optimze_optics(
     lr = 0.001, 
     beta = 0.001,
-    batch_size = 32,
-    epoches = 1,
+    batch_size = batch_size,
+    epoches = 20,
     test_freq = 500,
-    notes = 'April14_debug',
+    notes = 'April18_size100_baseline',
     mu_white_noise= 10, # >0
-    data_path = 'dataset/MNIST/')
+    data_path = data_path)
 
 

@@ -1,10 +1,8 @@
 '''
     unit [um].
 '''
-from cv2 import phase
 import matplotlib.pyplot as plt
 import numpy as np
-from sklearn.metrics import SCORERS
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -15,6 +13,7 @@ import os
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+import pandas as pd
 
 def toint(x):
     if type(x) == np.ndarray:
@@ -85,7 +84,6 @@ class Coherent:
         self.out_path = None
         
     def init_model(self, device, init_phase = None, init_detector = None):
-        self.detector = init_detector
         self.device = device
         prop = propagator(self.plane_size, self.step_size, self.prop_dis, self.wavelength)
         f_kernel = np.fft.fft2(np.fft.ifftshift(prop))
@@ -104,6 +102,7 @@ class Coherent:
         self.model.to(device)
     
     def assign_detector(self, detector):
+        self.detector = detector
         circular_mask = detector.create(self.plane_size, self.step_size)
         circular_mask = torch.tensor(circular_mask, dtype=self.dtype, requires_grad = False)
         state_dict = self.model.state_dict()
@@ -145,31 +144,10 @@ class Coherent:
     
     def optimze_detector(self, batch_size, data_path, select_idx, subspace_size = 10, n_iter = 20):
         from gradient_free_optimizers import HillClimbingOptimizer
+        from gradient_free_optimizers import RandomRestartHillClimbingOptimizer
+        from gradient_free_optimizers import EvolutionStrategyOptimizer
         radius = self.detector.radius
         init_coos = self.detector.coos
-        def dict2arr(paras):
-            coos = []
-            for key in paras.keys():
-                coos.append(paras[key])
-            coos = np.array(coos)
-            coos = coos.reshape(-1, 2)
-            return coos
-        def arr2dict(coos):
-            #coos shape: [number of detectors, 2]
-            paras = {}
-            for i in range(len(coos)):
-                paras['y' + str(i)] = coos[i, 0]
-                paras['x' + str(i)] = coos[i, 1]
-            return paras
-        def fit2space(sub_space, init_paras):
-            shape = init_paras.shape
-            init_paras = init_paras.reshape(-1,)
-            for i in range(len(init_paras)):
-                pi = init_paras[i]
-                idx = np.argmin(np.abs(pi - sub_space))
-                init_paras[i] = sub_space[idx]
-            init_paras = init_paras.reshape(shape)
-            return init_paras
         def obj_function(paras):
             '''
             paras is a dict that store the position of each detector.
@@ -191,19 +169,132 @@ class Coherent:
                 search_space['y' + str(i)] = sub_space.copy()
                 search_space['x' + str(i)] = sub_space.copy()
         
-        init_paras = fit2space(sub_space, init_coos)
-        init_paras = arr2dict(init_paras)
+        # init_paras = fit2space(sub_space, init_coos)
+        # init_paras = arr2dict(init_paras)
+        init_paras = arr2dict(init_coos)
         print("init paras:")
         print(init_paras)
-        initialize={"warm_start": [arr2dict(init_coos)]}
-        opt = HillClimbingOptimizer(search_space, initialize)
-        opt.search(obj_function, n_iter=n_iter)
+        initialize={"warm_start": [init_paras]}
+        #opt = HillClimbingOptimizer(search_space, initialize)
+        opt = RandomRestartHillClimbingOptimizer(search_space, initialize, n_iter_restart=10)
+        #opt = EvolutionStrategyOptimizer(search_space, initialize)
+        early_stopping = {
+            'n_iter_no_change': 50, #50 iter no change then stop.
+            'tol_rel': 1 #increase at least 1 percent.
+        }
+        opt.search(obj_function, n_iter=n_iter, early_stopping= early_stopping)
         print(f"best acc: {opt.best_score}")
         print("If you want to continue to train the phase, remember to assign detector by the best paras.")
-        return opt
+        best_coos = dict2arr(opt.best_para)
+        best_detector = CirleDetector(radius, best_coos)
+        return best_detector
+
+    def optimze(self, lr, beta, batch_size, epoches, notes, mu_white_noise, data_path, init_coos,
+                out_path = 'output_coherent/', subspace_size = 10, n_iter = 50, population = 1):
+        from gradient_free_optimizers import RandomRestartHillClimbingOptimizer
+        from gradient_free_optimizers import RandomSearchOptimizer
+        from gradient_free_optimizers import ParticleSwarmOptimizer
+        from gradient_free_optimizers import EvolutionStrategyOptimizer
+        
+        if not os.path.exists(out_path):
+            os.mkdir(out_path)
+        self.out_path = out_path = out_path + notes + '/'
+        x_train = np.load(data_path+'x_train_f.npy')
+        y_train = np.load(data_path+'y_train_f.npy')    
+        def trans2obj(sample):
+            sample['X'] = self.gen_obj(sample['X'])
+            return sample
+        dataset_train = SimpleDataset(x_train, y_train, trans2obj)
+        dataloader_train = DataLoader(dataset_train,
+                                shuffle=True,
+                                batch_size= batch_size)
+        print(f"Number of batches per epoch: {len(dataloader_train)}.")
+        loss = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(self.model.parameters(), lr=lr)
+        prop_noise_dist = torch.distributions.normal.Normal(0, 0.03)
+        white_noise_dist = torch.distributions.normal.Normal(mu_white_noise, 0.6 * mu_white_noise)
+        radius = self.detector.radius
+        Iters = []
+        def obj_function(paras):
+            writer = SummaryWriter(out_path + 'summary_' + str(sum(Iters)))
+            total_steps = epoches * len(dataloader_train)
+            coos = dict2arr(paras)
+            tmp_detector = CirleDetector(radius, coos)
+            if tmp_detector.invalid():
+                return 0
+            self.model.reset()
+            self.assign_detector(tmp_detector)
+            
+            for epoch in range(epoches):
+                for step, sample in enumerate(dataloader_train):
+                    X, Y = sample['X'], sample['Y']
+                    X_input, Y_input = torch.as_tensor(X).to(self.device, dtype = self.dtype), torch.as_tensor(Y).to(self.device)
+                    prop_noise = prop_noise_dist.sample(torch.Size([1, self.plane_size, self.plane_size])).to(self.device, dtype = torch.double)
+                    white_noise = white_noise_dist.sample(torch.Size([1, self.plane_size, self.plane_size])).to(self.device, dtype = torch.double)
+                    noise = (prop_noise, white_noise)
+                    signal, logit = self.model(X_input, noise)
+                    # Calculate loss 
+                    err1 = loss(logit, Y_input)
+                    err2 = - beta * logit.sum()
+                    err = err1 + err2
+                    # Calculate gradients in backward pass
+                    optimizer.zero_grad()
+                    err.backward()
+                    optimizer.step()
+                    global_step = epoch * len(dataloader_train) + step
+
+                    log_freq = int((len(dataloader_train))/10)
+                    if (global_step + 1)% log_freq == 0:
+                        writer.add_scalar('crossentropy loss',
+                            scalar_value = err1.item(), global_step = global_step)
+                        writer.add_scalar('logit sum loss',
+                            scalar_value = err2.item(), global_step = global_step)
+                        
+            acc = self.test(batch_size, data_path)
+            writer.add_scalar('Test accuracy',
+                scalar_value = np.round(acc * 100, 1), global_step = global_step)
+            obj_img = np.squeeze(X[0])
+            writer.add_figure('obj',
+                            get_img(obj_img, str(Y[0].item())),
+                            global_step= global_step)
+            I_img = signal.detach().cpu().numpy()[0]
+            I_img = np.squeeze(I_img[0])
+            I_img = self.detector.draw(I_img, self.step_size)
+            writer.add_figure('I_img',
+                            get_img(I_img, ''),
+                            global_step= global_step)  
+            phase = self.model.optical.phase.detach().cpu().numpy()
+            phase = np.squeeze(phase)
+            writer.add_figure('phase',
+                            get_img(phase),
+                            global_step= global_step) 
+            Iters.append(1)
+            return acc
+        
+        domain_min = 2 * radius
+        domain_max = self.size - domain_min
+        sub_space = np.round(np.linspace(domain_min, domain_max, subspace_size))
+        print("sub space:")
+        print(sub_space)
+        search_space = {}
+        for i in range(self.num_class):
+                search_space['y' + str(i)] = sub_space.copy()
+                search_space['x' + str(i)] = sub_space.copy()
+        
+        init_paras = [arr2dict(x) for x in init_coos] 
+        print("init paras:")
+        print(init_paras)
+        initialize={"warm_start": init_paras}
+        #opt = RandomSearchOptimizer(search_space, initialize)
+        #opt = ParticleSwarmOptimizer(search_space, initialize, population = population)
+        opt = EvolutionStrategyOptimizer(search_space, initialize, population = population)
+        opt.search(obj_function, n_iter=n_iter)
+        best_coos = dict2arr(opt.best_para)
+        np.savetxt(out_path + "best_detector_coos.csv", best_coos, delimiter= ',')   
+        opt.search_data.to_csv(out_path + "searched_detector_coos.csv")
+        return None
     
-    def optimze_optics(self, lr, beta, batch_size, epoches, test_freq, notes, mu_white_noise, data_path):
-        out_path = 'output_coherent/'
+    def optimze_optics(self, lr, beta, batch_size, epoches, test_freq, notes, mu_white_noise, data_path, out_path = 'output_coherent/'):
         if not os.path.exists(out_path):
             os.mkdir(out_path)
         self.out_path = out_path = out_path + notes + '/'
@@ -241,7 +332,9 @@ class Coherent:
                 global_step = epoch * len(dataloader_train) + step
                 
                 if (global_step + 1)% test_freq == 0:
-                    self.test(batch_size, data_path)
+                    acc = self.test(batch_size, data_path)
+                    writer.add_scalar('Test accuracy',
+                        scalar_value = np.round(acc * 100, 1), global_step = global_step)
                     obj_img = np.squeeze(X[0])
                     writer.add_figure('obj',
                                     get_img(obj_img, str(Y[0].item())),
@@ -293,7 +386,7 @@ class Coherent:
                     Y_pred = Y_pred + pred.tolist()
         right_num = np.equal(Y_label, Y_pred).sum()
         test_acc = right_num/len(Y_label)
-        print(f"Test accuracy: {test_acc * 100:.2f}%.")
+        #print(f"Test accuracy: {test_acc * 100:.2f}%.")
         return test_acc
 
 def get_img(img, title = None):
@@ -303,3 +396,27 @@ def get_img(img, title = None):
     if not (title is None):
         plt.title(title)
     return fig
+
+def dict2arr(paras):
+    coos = []
+    for key in paras.keys():
+        coos.append(paras[key])
+    coos = np.array(coos)
+    coos = coos.reshape(-1, 2)
+    return coos
+def arr2dict(coos):
+    #coos shape: [number of detectors, 2]
+    paras = {}
+    for i in range(len(coos)):
+        paras['y' + str(i)] = coos[i, 0]
+        paras['x' + str(i)] = coos[i, 1]
+    return paras
+def fit2space(sub_space, init_paras):
+    shape = init_paras.shape
+    init_paras = init_paras.reshape(-1,)
+    for i in range(len(init_paras)):
+        pi = init_paras[i]
+        idx = np.argmin(np.abs(pi - sub_space))
+        init_paras[i] = sub_space[idx]
+    init_paras = init_paras.reshape(shape)
+    return init_paras
