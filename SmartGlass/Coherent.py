@@ -7,13 +7,14 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from .Coherent_model import optical_model
-from .data_utils import create_circular_detector, input_label_process, draw_circular_detector, SimpleDataset
+from .data_utils import create_circular_detector, input_label_process, draw_circular_detector, SimpleDataset, input_label_process_complex, CM
 from .optical_utils import propagator, init_aperture
 import os
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import pandas as pd
+import cv2
 
 def toint(x):
     if type(x) == np.ndarray:
@@ -130,13 +131,30 @@ class Coherent:
         '''
             process a img into a model input.
         '''
+        if img.dtype == complex:
+            if img.shape[0] < self.plane_size:
+                x_abs = np.abs(img)
+                x_ph = np.angle(img)
+                abs_resized = cv2.resize(x_abs,(self.plane_size, self.plane_size))
+                ph_resized = cv2.resize(x_ph,(self.plane_size, self.plane_size))
+                img = abs_resized * np.exp(1j * ph_resized)
+            img = np.reshape(img, (1, img.shape[0], img.shape[1]))
+            return img
         object_size = toint(self.object.size / self.step_size)
         out_x, _ = input_label_process(img, None, self.plane_size, object_size, self.object.font, random_shift = random_shift, background = background)
         return out_x
     
+    def gen_obj_complex(self, field, random_shift = False, background = False):
+        '''
+            process a img into a model input.
+        '''
+        object_size = toint(self.object.size / self.step_size)
+        out_x, _ = input_label_process_complex(field, None, self.plane_size, object_size, random_shift = random_shift, background = background)
+        return out_x
     def forward(self, obj):
         data_input = torch.as_tensor(obj)
-        data_input = data_input.to(self.device, dtype = self.dtype)
+        
+        data_input = data_input.to(self.device, dtype = self.cdtype)
         with torch.no_grad():
             signal, logit = self.model(data_input, noise = None)
         signal = signal.cpu().numpy()
@@ -228,7 +246,7 @@ class Coherent:
             for epoch in range(epoches):
                 for step, sample in enumerate(dataloader_train):
                     X, Y = sample['X'], sample['Y']
-                    X_input, Y_input = torch.as_tensor(X).to(self.device, dtype = self.dtype), torch.as_tensor(Y).to(self.device)
+                    X_input, Y_input = torch.as_tensor(X).to(self.device, dtype = self.cdtype), torch.as_tensor(Y).to(self.device)
                     prop_noise = prop_noise_dist.sample(torch.Size([1, self.plane_size, self.plane_size])).to(self.device, dtype = torch.double)
                     white_noise = white_noise_dist.sample(torch.Size([1, self.plane_size, self.plane_size])).to(self.device, dtype = torch.double)
                     noise = (prop_noise, white_noise)
@@ -244,6 +262,8 @@ class Coherent:
                     global_step = epoch * len(dataloader_train) + step
 
                     log_freq = int((len(dataloader_train))/10)
+                    if log_freq == 0:
+                        log_freq = 1
                     if (global_step + 1)% log_freq == 0:
                         writer.add_scalar('crossentropy loss',
                             scalar_value = err1.item(), global_step = global_step)
@@ -316,7 +336,7 @@ class Coherent:
         for epoch in tqdm(range(epoches)):
             for step, sample in enumerate(tqdm(dataloader_train, leave=False)):
                 X, Y = sample['X'], sample['Y']
-                X_input, Y_input = torch.as_tensor(X).to(self.device, dtype = self.dtype), torch.as_tensor(Y).to(self.device)
+                X_input, Y_input = torch.as_tensor(X).to(self.device, dtype = self.cdtype), torch.as_tensor(Y).to(self.device,dtype = torch.long)
                 prop_noise = prop_noise_dist.sample(torch.Size([1, self.plane_size, self.plane_size])).to(self.device, dtype = torch.double)
                 white_noise = white_noise_dist.sample(torch.Size([1, self.plane_size, self.plane_size])).to(self.device, dtype = torch.double)
                 noise = (prop_noise, white_noise)
@@ -330,12 +350,13 @@ class Coherent:
                 err.backward()
                 optimizer.step()
                 global_step = epoch * len(dataloader_train) + step
-                
-                if (global_step + 1)% test_freq == 0:
+                final_step = (epoches - 1) * len(dataloader_train) - 1
+                if (global_step + 1)% test_freq == 0 or global_step == final_step:
                     acc = self.test(batch_size, data_path)
                     writer.add_scalar('Test accuracy',
                         scalar_value = np.round(acc * 100, 1), global_step = global_step)
                     obj_img = np.squeeze(X[0])
+                    
                     writer.add_figure('obj',
                                     get_img(obj_img, str(Y[0].item())),
                                     global_step= global_step)
@@ -352,14 +373,19 @@ class Coherent:
                                     global_step= global_step) 
                 
                 log_freq = int((len(dataloader_train))/10)
+                if log_freq == 0:
+                    log_freq = 1
                 if (global_step + 1)% log_freq == 0:
                     writer.add_scalar('crossentropy loss',
                         scalar_value = err1.item(), global_step = global_step)
                     writer.add_scalar('logit sum loss',
                         scalar_value = err2.item(), global_step = global_step)
         np.savetxt(out_path + "phase.csv", phase, delimiter= ',')    
-
-    def test(self, batch_size, data_path, select_idx = None):
+        acc = self.test(batch_size, data_path, confusion_matrix = True)
+        writer.add_scalar('Test accuracy',
+            scalar_value = np.round(acc * 100, 1), global_step = global_step)
+        
+    def test(self, batch_size, data_path, select_idx = None, confusion_matrix = False):
         self.model.eval()
         Y_pred = []
         Y_label = []
@@ -374,25 +400,36 @@ class Coherent:
             return sample
         dataset_test = SimpleDataset(x_test, y_test, trans2obj)
         dataloader_test = DataLoader(dataset_test,
-                                shuffle=True,
+                                shuffle=False,
                                 batch_size= batch_size)
         with torch.no_grad():
             for sample in dataloader_test:
                     X, Y = sample['X'], sample['Y']
                     Y_label += Y.tolist()
-                    X_input, Y_input = torch.as_tensor(X).to(self.device, dtype = self.dtype), torch.as_tensor(Y).to(self.device)
+                    X_input, Y_input = torch.as_tensor(X).to(self.device, dtype = self.cdtype), torch.as_tensor(Y).to(self.device)
                     _, logit = self.model(X_input, None)
                     pred = np.argmax(logit.cpu().numpy(), axis = -1)
                     Y_pred = Y_pred + pred.tolist()
         right_num = np.equal(Y_label, Y_pred).sum()
         test_acc = right_num/len(Y_label)
+        if confusion_matrix:
+            CM(Y_label, Y_pred, self.num_class, self.out_path)
         #print(f"Test accuracy: {test_acc * 100:.2f}%.")
         return test_acc
 
 def get_img(img, title = None):
-    fig = plt.figure()
-    plt.imshow(img)
-    plt.colorbar()
+    if img.dtype == torch.complex128:
+        fig, axes = plt.subplots(1, 2, figsize = (10, 4))
+        plot0 = axes[0].imshow(np.abs(img))
+        plt.colorbar(plot0, ax = axes[0])
+        axes[0].set_title('amplitude')
+        plot1 = axes[1].imshow(np.angle(img))
+        plt.colorbar(plot1, ax = axes[1])
+        axes[1].set_title('phase')
+    else:
+        fig = plt.figure()
+        plt.imshow(img)
+        plt.colorbar()
     if not (title is None):
         plt.title(title)
     return fig

@@ -102,7 +102,7 @@ This is the end the forward example, the debug_forward.py is provided in "debug_
 
 **The optimization**:
 optimize the optics:
-'''
+```
 sim.init_model('cuda', init_phase = None, init_detector = detector)
 batch_size = 64
 data_path = 'dataset/MNIST/'
@@ -115,7 +115,7 @@ sim.optimze_optics(
     notes = 'April18_size100_baseline',
     mu_white_noise= 10, # >0
     data_path = data_path)
-'''
+```
 the sim.optimze_optics will create an output_coherent directory if it does not exists. You will see "notes" as a directory name in the "output_coherent". In the "notes", you will see a "summary" directory, which can be read by tensorboard. 
 ```
 tensorboard --logdir "the path of the summary"

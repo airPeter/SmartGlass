@@ -64,6 +64,24 @@ def input_label_process(x,y,plane_size, object_size, font, random_shift, backgro
     output_x = np.reshape(output_tmp, (1, plane_size, plane_size))
     return output_x, y
 
+def input_label_process_complex(x,y,plane_size, object_size, random_shift, background):
+    x_abs = np.abs(x)
+    x_ph = np.angle(x)
+    abs_resized = cv2.resize(x_abs,(object_size, object_size))
+    ph_resized = cv2.resize(x_ph,(object_size, object_size))
+    if background:
+        abs_resized = abs_resized * random_intensity_bias(object_size)
+    shift_x = (plane_size - object_size)//2
+    if random_shift:
+        shift = np.random.randint(-shift_x//2, shift_x//2, (2,)) + shift_x
+    else:
+        shift = np.array([shift_x, shift_x], dtype = int)
+    output_tmp = np.zeros((plane_size, plane_size), dtype=complex)
+    x_process = abs_resized * np.exp(1j * ph_resized)
+    output_tmp[shift[0]: shift[0] + object_size, shift[1]: shift[1] + object_size] = x_process
+    output_x = np.reshape(output_tmp, (1, plane_size, plane_size))
+    return output_x, y
+
 def data_generator(batch_size, data, data_label, group, shuffle):
     while(True):
         indexes = np.arange(0,data.shape[0],1)
@@ -196,4 +214,14 @@ def vis_img(img, title):
     plt.imshow(img)
     plt.colorbar()
     plt.title(title)
+    plt.show()
+
+def vis_field(obj, title):
+    fig, axes = plt.subplots(1, 2, figsize = (10, 4))
+    plot0 = axes[0].imshow(np.abs(obj))
+    plt.colorbar(plot0, ax = axes[0])
+    axes[0].set_title('amplitude')
+    plot1 = axes[1].imshow(np.angle(obj))
+    plt.colorbar(plot1, ax = axes[1])
+    axes[1].set_title('phase')
     plt.show()
